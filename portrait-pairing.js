@@ -19,7 +19,7 @@
   }
 
   function pairingOrder() {
-    return rawConfig().portrait_pairing_order === "sequential" ? "sequential" : "random";
+    return rawConfig().media_order === "random" ? "random" : "sequential";
   }
 
   function pairingFit() {

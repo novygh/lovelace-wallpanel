@@ -7,17 +7,22 @@ Development branch for upstream issue #514.
 ```yaml
 wallpanel:
   portrait_pairing: true
-  portrait_pairing_order: random      # random | sequential
   portrait_pairing_fit: contain       # contain | cover
 ```
 
 Defaults:
 
 - `portrait_pairing: false`
-- `portrait_pairing_order: random`
 - `portrait_pairing_fit: contain`
 
-## Random mode
+## Pairing order
+
+Pairing follows WallPanel's native `media_order`; there is no separate portrait ordering option.
+
+- `media_order: random` uses random portrait partner selection.
+- any non-random media order uses sequential adjacency: only the immediately following portrait can pair; an isolated portrait stays single.
+
+## Random media order
 
 `random` keeps the behavior validated during prototype testing:
 
@@ -26,7 +31,7 @@ Defaults:
 - the partner is preloaded while the next A/B container is still hidden, so the complete pair enters with the normal WallPanel crossfade;
 - the WallPanel media list and index are not reordered.
 
-## Sequential mode
+## Non-random media order
 
 `sequential` preserves the real WallPanel media order:
 
