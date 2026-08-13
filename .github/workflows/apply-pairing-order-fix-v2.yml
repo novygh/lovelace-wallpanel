@@ -1,0 +1,47 @@
+name: Apply pairing order fix v2
+
+on:
+  push:
+    branches:
+      - fix/pairing-follows-media-order
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pairing-follows-media-order
+      - name: Patch files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('portrait-pairing.js')
+          s = p.read_text()
+          old = 'return rawConfig().portrait_pairing_order === "sequential" ? "sequential" : "random";'
+          new = 'return rawConfig().media_order === "random" ? "random" : "sequential";'
+          if old not in s:
+              raise SystemExit('pairingOrder anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('PORTRAIT_PAIRING_PLAN.md')
+          s = p.read_text()
+          s = s.replace('  portrait_pairing_order: random      # random | sequential\n', '')
+          s = s.replace('- `portrait_pairing_order: random`\n', '')
+          s = s.replace('## Random mode\n\n', '## Pairing order\n\nPairing follows WallPanel\'s native `media_order`; there is no separate portrait ordering option.\n\n- `media_order: random` uses random portrait partner selection.\n- any non-random media order uses sequential adjacency: only the immediately following portrait can pair; an isolated portrait stays single.\n\n## Random media order\n\n', 1)
+          s = s.replace('## Sequential mode\n\n', '## Non-random media order\n\n', 1)
+          p.write_text(s)
+          PY
+      - run: node --check portrait-pairing.js
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add portrait-pairing.js PORTRAIT_PAIRING_PLAN.md
+          git commit -m "Make portrait pairing follow media_order"
+          git push
