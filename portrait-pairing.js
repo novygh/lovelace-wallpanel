@@ -1,14 +1,12 @@
 (() => {
   const PREFIX = "media-source://";
-  const cache = new Map();
+  const orientationCache = new Map();
+  const metadataCache = new Map();
   const sequentialConsumed = new Set();
   let lastPrimary = "";
   let lastPartner = "";
 
   function rawConfig() {
-    const internals = window.__wallpanelPortraitPairingInternals;
-    if (internals?.config) return internals.config;
-
     const ha = document.querySelector("home-assistant");
     const main = ha?.shadowRoot?.querySelector("home-assistant-main");
     const panel = main?.shadowRoot?.querySelector("ha-panel-lovelace");
@@ -34,7 +32,9 @@
   }
 
   function container(wp, img) {
-    return img === wp.imageOne ? wp.imageOneContainer : img === wp.imageTwo ? wp.imageTwoContainer : null;
+    if (img === wp.imageOne) return wp.imageOneContainer;
+    if (img === wp.imageTwo) return wp.imageTwoContainer;
+    return null;
   }
 
   function standardInfoContainer(wp, img) {
@@ -52,23 +52,22 @@
   function secondary(wp, img, create = true) {
     const c = container(wp, img);
     if (!c) return null;
-    let s = c.querySelector(".wallpanel-portrait-pair");
-    if (!s && create) {
-      s = document.createElement("img");
-      s.className = "wallpanel-portrait-pair";
-      s.alt = "";
-      s.draggable = false;
-      Object.assign(s.style, {
+    let pair = c.querySelector(".wallpanel-portrait-pair");
+    if (!pair && create) {
+      pair = document.createElement("img");
+      pair.className = "wallpanel-portrait-pair";
+      pair.alt = "";
+      pair.draggable = false;
+      Object.assign(pair.style, {
         position: "absolute",
         display: "none",
         visibility: "hidden",
         pointerEvents: "none",
         border: "none"
       });
-      const info = standardInfoContainer(wp, img);
-      c.insertBefore(s, info);
+      c.insertBefore(pair, standardInfoContainer(wp, img));
     }
-    return s;
+    return pair;
   }
 
   function pairInfo(wp, img, create = true) {
@@ -82,7 +81,7 @@
         position: "absolute",
         left: "0.5em",
         bottom: "0.5em",
-        zIndex: "4",
+        zIndex: "20",
         display: "none",
         flexWrap: "wrap",
         gap: "0.35em",
@@ -97,9 +96,9 @@
     return box;
   }
 
-  function chip(text, arrow) {
-    const el = document.createElement("span");
-    Object.assign(el.style, {
+  function chip(html, arrow) {
+    const chipElement = document.createElement("span");
+    Object.assign(chipElement.style, {
       display: "inline-block",
       padding: "0.12em 0.5em",
       background: "#00000077",
@@ -107,21 +106,43 @@
       borderRadius: "0.5rem",
       whiteSpace: "nowrap"
     });
-    const arrowEl = document.createElement("strong");
-    arrowEl.textContent = arrow;
-    arrowEl.style.marginRight = "0.3em";
-    el.appendChild(arrowEl);
+
+    const arrowElement = document.createElement("strong");
+    arrowElement.textContent = arrow;
+    arrowElement.style.marginRight = "0.3em";
+    chipElement.appendChild(arrowElement);
+
     const content = document.createElement("span");
-    content.innerHTML = text || "—";
-    el.appendChild(content);
-    return el;
+    content.innerHTML = html || "—";
+    chipElement.appendChild(content);
+    return chipElement;
   }
 
   function restoreStandardInfo(wp, img) {
-    const info = standardInfoContainer(wp, img);
+    const standard = standardInfoContainer(wp, img);
     const box = pairInfo(wp, img, false);
-    if (info) info.style.removeProperty("visibility");
+    if (standard) {
+      standard.style.removeProperty("visibility");
+      standard.style.zIndex = "20";
+    }
     if (box) box.style.display = "none";
+  }
+
+  function clearPairLayout(img) {
+    if (!img) return;
+    for (const prop of [
+      "position",
+      "top",
+      "left",
+      "width",
+      "height",
+      "object-fit",
+      "object-position",
+      "visibility",
+      "pointer-events"
+    ]) {
+      img.style.removeProperty(prop);
+    }
   }
 
   function clear(wp, img) {
@@ -129,59 +150,67 @@
     img.dataset.portraitPaired = "";
     img.dataset.portraitPartner = "";
     img.dataset.portraitPartnerResolved = "";
+    clearPairLayout(img);
     restoreStandardInfo(wp, img);
 
-    const s = secondary(wp, img, false);
-    if (s) {
-      s.onload = null;
-      s.onerror = null;
-      s.style.display = "none";
-      s.style.visibility = "hidden";
-      s.removeAttribute("src");
-      s.mediaUrl = null;
-      s.infoCacheUrl = null;
+    const pair = secondary(wp, img, false);
+    if (pair) {
+      pair.onload = null;
+      pair.onerror = null;
+      pair.style.display = "none";
+      pair.style.visibility = "hidden";
+      pair.removeAttribute("src");
+      pair.mediaUrl = null;
+      pair.infoCacheUrl = null;
+      pair.dataset.exifRequested = "";
     }
   }
 
   async function resolve(wp, source) {
-    const r = await wp.hass.callWS({ type: "media_source/resolve_media", media_content_id: source });
-    if (r.mime_type && !String(r.mime_type).startsWith("image/")) return null;
-    if (!r.url) return null;
-    return /^https?:\/\//i.test(r.url) ? r.url : document.location.origin + r.url;
+    const result = await wp.hass.callWS({
+      type: "media_source/resolve_media",
+      media_content_id: source
+    });
+    if (result.mime_type && !String(result.mime_type).startsWith("image/")) return null;
+    if (!result.url) return null;
+    return /^https?:\/\//i.test(result.url) ? result.url : document.location.origin + result.url;
   }
 
   function load(url, target = new Image()) {
-    return new Promise((ok, fail) => {
+    return new Promise((resolvePromise, rejectPromise) => {
       let done = false;
-      const finish = (fn, arg) => {
+      const finish = (callback, value) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         target.onload = null;
         target.onerror = null;
-        fn(arg);
+        callback(value);
       };
-      const timer = setTimeout(() => finish(fail, new Error("portrait pairing load timeout")), 3000);
-      target.onload = () => finish(ok, target);
-      target.onerror = () => finish(fail, new Error("portrait pairing load error"));
+      const timer = setTimeout(
+        () => finish(rejectPromise, new Error("portrait pairing load timeout")),
+        3000
+      );
+      target.onload = () => finish(resolvePromise, target);
+      target.onerror = () => finish(rejectPromise, new Error("portrait pairing load error"));
       target.src = url;
     });
   }
 
   async function detect(wp, source) {
-    if (cache.has(source)) return cache.get(source);
+    if (orientationCache.has(source)) return orientationCache.get(source);
     try {
       const url = await resolve(wp, source);
       if (!url) {
-        cache.set(source, "other");
+        orientationCache.set(source, "other");
         return "other";
       }
       const img = await load(url);
-      const o = orientation(img);
-      cache.set(source, o || "error");
-      return o || "error";
+      const result = orientation(img) || "error";
+      orientationCache.set(source, result);
+      return result;
     } catch (_) {
-      cache.set(source, "error");
+      orientationCache.set(source, "error");
       return "error";
     }
   }
@@ -190,25 +219,45 @@
     const list = wp.mediaList || [];
     const out = [];
     if (!list.length) return out;
-    const i = wp.mediaIndex;
-    for (let n = 1; n < list.length; n++) {
-      const j =
+    const index = wp.mediaIndex;
+
+    for (let offset = 1; offset < list.length; offset++) {
+      const candidateIndex =
         wp.mediaListDirection === "backwards"
-          ? (i - n + list.length) % list.length
-          : (i + n) % list.length;
-      const s = list[j];
-      if (s && s !== primary && s.startsWith(PREFIX) && !out.includes(s)) out.push(s);
+          ? (index - offset + list.length) % list.length
+          : (index + offset) % list.length;
+      const source = list[candidateIndex];
+      if (
+        source &&
+        source !== primary &&
+        source.startsWith(PREFIX) &&
+        !out.includes(source)
+      ) {
+        out.push(source);
+      }
     }
     return out;
   }
 
-  function shuffle(a) {
-    a = [...a];
-    for (let i = a.length - 1; i > 0; i--) {
+  function immediateNextSource(wp, primary) {
+    const list = wp.mediaList || [];
+    if (list.length < 2 || wp.mediaIndex < 0) return null;
+    const index =
+      wp.mediaListDirection === "backwards"
+        ? (wp.mediaIndex - 1 + list.length) % list.length
+        : (wp.mediaIndex + 1) % list.length;
+    const source = list[index];
+    if (!source || source === primary || !source.startsWith(PREFIX)) return null;
+    return source;
+  }
+
+  function shuffle(items) {
+    const result = [...items];
+    for (let i = result.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
+      [result[i], result[j]] = [result[j], result[i]];
     }
-    return a;
+    return result;
   }
 
   async function nextPortrait(wp, primary, token) {
@@ -228,10 +277,11 @@
       await load(url, pair);
       if (token !== wp.__portraitPairToken) return false;
       if (orientation(pair) !== "portrait") {
-        cache.set(source, orientation(pair) || "error");
+        orientationCache.set(source, orientation(pair) || "error");
         return false;
       }
-      cache.set(source, "portrait");
+
+      orientationCache.set(source, "portrait");
       pair.mediaUrl = url;
       pair.infoCacheUrl = source;
       pair.style.display = "block";
@@ -247,13 +297,16 @@
   async function chooseRandom(wp, img, token) {
     const primary = img.infoCacheUrl || "";
     const all = cyclic(wp, primary);
-    const next = await nextPortrait(wp, primary, token);
+    const upcomingPortrait = await nextPortrait(wp, primary, token);
     if (token !== wp.__portraitPairToken) return false;
 
     let preferred = all.filter(
-      (source) => source !== next && source !== lastPrimary && source !== lastPartner
+      (source) =>
+        source !== upcomingPortrait &&
+        source !== lastPrimary &&
+        source !== lastPartner
     );
-    if (!preferred.length) preferred = all.filter((source) => source !== next);
+    if (!preferred.length) preferred = all.filter((source) => source !== upcomingPortrait);
 
     const fallback = all.filter((source) => !preferred.includes(source));
     for (const source of [...shuffle(preferred), ...shuffle(fallback)]) {
@@ -270,10 +323,17 @@
 
   async function chooseSequential(wp, img, token) {
     const primary = img.infoCacheUrl || "";
-    const source = await nextPortrait(wp, primary, token);
+    const source = immediateNextSource(wp, primary);
     if (!source || token !== wp.__portraitPairToken) return false;
+
+    // Sequential mode preserves the real WallPanel order exactly:
+    // only the immediately following media item can become the partner.
+    // If it is not portrait, the current portrait remains a normal solo slide.
+    if ((await detect(wp, source)) !== "portrait") return false;
     if (!(await loadPartner(wp, img, source, token))) return false;
 
+    // The partner has already been displayed in its correct position as the
+    // right side of this pair, so consume its next standalone turn once.
     sequentialConsumed.add(source);
     lastPrimary = primary;
     lastPartner = source;
@@ -282,7 +342,7 @@
 
   async function choose(wp, img, token) {
     const primary = img.infoCacheUrl || "";
-    if (!primary.startsWith(PREFIX) || orientation(img) !== "portrait") return null;
+    if (!primary.startsWith(PREFIX) || orientation(img) !== "portrait") return false;
 
     const paired =
       pairingOrder() === "sequential"
@@ -365,8 +425,10 @@
             else if (type === "options") {
               options = {};
               argValue.split(",").forEach((part) => {
-                const p = part.split(":", 2);
-                if (p[0] && p[1]) options[p[0].replace(/\s/g, "")] = p[1].replace(/\s/g, "");
+                const option = part.split(":", 2);
+                if (option[0] && option[1]) {
+                  options[option[0].replace(/\s/g, "")] = option[1].replace(/\s/g, "");
+                }
               });
             }
           }
@@ -392,8 +454,7 @@
           if (isNaN(date)) continue;
           if (!options) options = { year: "numeric", month: "2-digit", day: "2-digit" };
           const language =
-            document.querySelector("home-assistant")?.hass?.locale?.language ||
-            navigator.language;
+            document.querySelector("home-assistant")?.hass?.locale?.language || navigator.language;
           value = date.toLocaleDateString(language, options);
         }
 
@@ -404,31 +465,12 @@
     });
   }
 
-  function infoCache() {
-    return window.__wallpanelPortraitPairingInternals?.mediaInfoCache;
-  }
-
-  function addInfo(source, value) {
-    const internals = window.__wallpanelPortraitPairingInternals;
-    if (internals?.addToMediaInfoCache) internals.addToMediaInfoCache(source, value);
-  }
-
-  function ensureExif(wp, img, source, resolvedUrl) {
-    const internals = window.__wallpanelPortraitPairingInternals;
-    if (!internals?.getImageData || !source || !resolvedUrl) return;
-    if (infoCache()?.has(source)) return;
-
-    const tmp = document.createElement("img");
-    tmp.src = resolvedUrl;
-    tmp.mediaUrl = resolvedUrl;
-    tmp.infoCacheUrl = source;
-
-    try {
-      internals.getImageData(tmp, function () {
-        addInfo(source, tmp.exifdata || {});
-        updatePairInfo(wp, img);
-      });
-    } catch (_) {}
+  function captureMetadata(mediaElement) {
+    const source = mediaElement?.infoCacheUrl;
+    if (!source) return;
+    if (mediaElement.exifdata && Object.keys(mediaElement.exifdata).length) {
+      metadataCache.set(source, mediaElement.exifdata);
+    }
   }
 
   function updatePairInfo(wp, img) {
@@ -438,14 +480,13 @@
 
     const primarySource = img.infoCacheUrl || "";
     const partnerSource = img.dataset.portraitPartner || "";
-    const primaryInfo = infoCache()?.get(primarySource) || {};
-    const partnerInfo = infoCache()?.get(partnerSource) || {};
+    let left = renderTemplate(metadataCache.get(primarySource) || {});
+    const right = renderTemplate(metadataCache.get(partnerSource) || {});
 
-    let left = renderTemplate(primaryInfo);
-    let right = renderTemplate(partnerInfo);
-
-    const existingPrimary = standardInfoElement(wp, img)?.innerHTML || "";
-    if (!left && existingPrimary) left = existingPrimary;
+    // The native WallPanel label is the authoritative fallback for the primary
+    // photo and also proves that the original info path remains functional.
+    const nativePrimary = standardInfoElement(wp, img)?.innerHTML || "";
+    if (!left && nativePrimary) left = nativePrimary;
 
     const box = pairInfo(wp, img);
     box.innerHTML = "";
@@ -457,20 +498,21 @@
     if (standard) standard.style.visibility = "hidden";
   }
 
+  function requestPartnerExif(wp, img) {
+    const pair = secondary(wp, img, false);
+    if (!pair?.src || pair.dataset.exifRequested === "1") return;
+    pair.dataset.exifRequested = "1";
+    try {
+      wp.fetchEXIFInfo(pair);
+    } catch (_) {}
+  }
+
   function schedulePairInfo(wp, img) {
     if (img?.dataset?.portraitPaired !== "1") return;
-
-    const primarySource = img.infoCacheUrl || "";
-    const partnerSource = img.dataset.portraitPartner || "";
-    const primaryResolved = img.mediaUrl || img.src || "";
-    const partnerResolved = img.dataset.portraitPartnerResolved || secondary(wp, img, false)?.src || "";
-
-    ensureExif(wp, img, primarySource, primaryResolved);
-    ensureExif(wp, img, partnerSource, partnerResolved);
-
+    requestPartnerExif(wp, img);
     requestAnimationFrame(() => updatePairInfo(wp, img));
     setTimeout(() => updatePairInfo(wp, img), 150);
-    setTimeout(() => updatePairInfo(wp, img), 800);
+    setTimeout(() => updatePairInfo(wp, img), 900);
   }
 
   function isConsumedSequential(img) {
@@ -481,25 +523,28 @@
   }
 
   customElements.whenDefined("wallpanel-view").then(() => {
-    const p = customElements.get("wallpanel-view").prototype;
-    if (p.__portraitPairingFork) return;
+    const prototype = customElements.get("wallpanel-view").prototype;
+    if (prototype.__portraitPairingFork) return;
 
-    const update = p.updateMedia;
-    const dimensions = p.setMediaDimensions;
-    const setInfo = p.setMediaDataInfo;
+    const updateMedia = prototype.updateMedia;
+    const setMediaDimensions = prototype.setMediaDimensions;
+    const setMediaDataInfo = prototype.setMediaDataInfo;
 
-    p.updateMedia = async function (img) {
-      clear(this, img);
+    prototype.updateMedia = async function (initialTarget) {
+      let target = initialTarget;
       let loaded = null;
-
       const maxAttempts = Math.max((this.mediaList || []).length, 1) + 1;
+
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        clear(this, target);
         const token = (this.__portraitPairToken = (this.__portraitPairToken || 0) + 1);
-        loaded = await update.call(this, img);
+        loaded = await updateMedia.call(this, target);
         if (!loaded || !enabled()) return loaded;
 
+        // In sequential mode a portrait used as the right-hand partner has
+        // already been shown, so skip exactly its next standalone turn.
         if (pairingOrder() === "sequential" && isConsumedSequential(loaded)) {
-          clear(this, loaded);
+          target = loaded;
           continue;
         }
 
@@ -508,45 +553,45 @@
           return loaded;
         }
 
-        const result = await choose(this, loaded, token);
-        if (result === true) return loaded;
+        if (await choose(this, loaded, token)) return loaded;
+
+        // No valid partner: keep the portrait as a normal single WallPanel
+        // slide. This is essential for sequential mode to preserve 100% order.
         clear(this, loaded);
+        restoreStandardInfo(this, loaded);
+        return loaded;
       }
 
-      if (loaded && orientation(loaded) === "portrait") {
-        const pair = secondary(this, loaded);
-        try {
-          await load(loaded.src, pair);
-          pair.mediaUrl = loaded.mediaUrl;
-          pair.infoCacheUrl = loaded.infoCacheUrl;
-          loaded.dataset.portraitPartner = loaded.infoCacheUrl || "";
-          loaded.dataset.portraitPartnerResolved = loaded.mediaUrl || loaded.src || "";
-          loaded.dataset.portraitPaired = "1";
-          layout(this, loaded);
-          schedulePairInfo(this, loaded);
-        } catch (_) {}
-      }
       return loaded;
     };
 
-    p.setMediaDimensions = function (...args) {
-      const result = dimensions.apply(this, args);
+    prototype.setMediaDimensions = function (...args) {
+      const result = setMediaDimensions.apply(this, args);
       const active = this.getActiveMediaElement?.();
       layout(this, active);
       return result;
     };
 
-    p.setMediaDataInfo = function (...args) {
-      const result = setInfo.apply(this, args);
-      const active = this.getActiveMediaElement?.();
-      if (active?.dataset?.portraitPaired === "1") {
-        schedulePairInfo(this, active);
-      } else if (active) {
-        restoreStandardInfo(this, active);
+    prototype.setMediaDataInfo = function (...args) {
+      const mediaElement = args[0] || null;
+      captureMetadata(mediaElement);
+      const result = setMediaDataInfo.apply(this, args);
+      const source = mediaElement?.infoCacheUrl || "";
+
+      for (const candidate of [this.imageOne, this.imageTwo]) {
+        if (
+          candidate?.dataset?.portraitPaired === "1" &&
+          (candidate.infoCacheUrl === source || candidate.dataset.portraitPartner === source)
+        ) {
+          updatePairInfo(this, candidate);
+        }
       }
+
+      const active = this.getActiveMediaElement?.();
+      if (active?.dataset?.portraitPaired !== "1" && active) restoreStandardInfo(this, active);
       return result;
     };
 
-    Object.defineProperty(p, "__portraitPairingFork", { value: true });
+    Object.defineProperty(prototype, "__portraitPairingFork", { value: true });
   });
 })();
