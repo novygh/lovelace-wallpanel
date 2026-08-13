@@ -1,0 +1,61 @@
+name: Apply pairing order fix
+
+on:
+  push:
+    branches:
+      - fix/pairing-follows-media-order
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pairing-follows-media-order
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Patch portrait pairing order
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('portrait-pairing.js')
+          text = path.read_text()
+          old = '''  function pairingOrder() {
+            return rawConfig().portrait_pairing_order === "sequential" ? "sequential" : "random";
+          }
+          '''
+          new = '''  function pairingOrder() {
+            return rawConfig().media_order === "random" ? "random" : "sequential";
+          }
+          '''
+          if old not in text:
+              raise SystemExit('pairingOrder anchor not found')
+          path.write_text(text.replace(old, new, 1))
+
+          plan = Path('PORTRAIT_PAIRING_PLAN.md')
+          doc = plan.read_text()
+          doc = doc.replace('  portrait_pairing_order: random      # random | sequential\n', '')
+          doc = doc.replace('- `portrait_pairing_order: random`\n', '')
+          doc = doc.replace(
+              '## Random mode\n\n',
+              '## Pairing order\n\nPairing follows WallPanel\'s native `media_order`; there is no separate portrait ordering option.\n\n- `media_order: random` uses random portrait partner selection.\n- any non-random media order uses sequential adjacency: only the immediately following portrait can pair; an isolated portrait stays single.\n\n## Random media order\n\n',
+              1,
+          )
+          doc = doc.replace('## Sequential mode\n\n', '## Non-random media order\n\n', 1)
+          plan.write_text(doc)
+          PY
+      - name: Verify JavaScript
+        run: node --check portrait-pairing.js
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add portrait-pairing.js PORTRAIT_PAIRING_PLAN.md
+          git commit -m "Make portrait pairing follow media_order"
+          git push
