@@ -1,0 +1,87 @@
+name: Sync upstream safely
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wallpanel-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        id: upstream
+        run: |
+          git remote add upstream https://github.com/j-a-n/lovelace-wallpanel.git || true
+          git fetch upstream main
+          CURRENT=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$UPSTREAM" "$CURRENT"; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Fork already contains current upstream main."
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "New upstream commit detected: $UPSTREAM"
+          fi
+
+      - name: Preserve fork overlay
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          mkdir -p /tmp/novy-overlay/.github/workflows /tmp/novy-overlay/scripts
+          cp wallpanel.js hacs.json portrait-pairing.js portrait-info-fix.js media-info-fallback.js ui-polish-r25.js /tmp/novy-overlay/
+          cp .github/workflows/sync-upstream-safe.yml /tmp/novy-overlay/.github/workflows/
+          cp scripts/validate-fork-overlay.mjs /tmp/novy-overlay/scripts/
+
+      - name: Rebuild candidate from upstream plus overlay
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          git checkout -B sync-candidate upstream/main
+          cp /tmp/novy-overlay/wallpanel.js ./wallpanel.js
+          cp /tmp/novy-overlay/hacs.json ./hacs.json
+          cp /tmp/novy-overlay/portrait-pairing.js ./portrait-pairing.js
+          cp /tmp/novy-overlay/portrait-info-fix.js ./portrait-info-fix.js
+          cp /tmp/novy-overlay/media-info-fallback.js ./media-info-fallback.js
+          cp /tmp/novy-overlay/ui-polish-r25.js ./ui-polish-r25.js
+          mkdir -p .github/workflows scripts
+          cp /tmp/novy-overlay/.github/workflows/sync-upstream-safe.yml .github/workflows/sync-upstream-safe.yml
+          cp /tmp/novy-overlay/scripts/validate-fork-overlay.mjs scripts/validate-fork-overlay.mjs
+
+      - name: Validate overlay compatibility
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          node scripts/validate-fork-overlay.mjs
+          node --check wallpanel-src.js
+          node --check portrait-pairing.js
+          node --check portrait-info-fix.js
+          node --check media-info-fallback.js
+          node --check ui-polish-r25.js
+
+      - name: Publish only a compatible update
+        if: steps.upstream.outputs.needed == 'true'
+        env:
+          EXPECTED_MAIN: ${{ steps.upstream.outputs.current }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.upstream }}
+        run: |
+          git add -A
+          git commit -m "Sync upstream ${UPSTREAM_SHA:0:12} with novy overlay"
+          git push --force-with-lease=refs/heads/main:$EXPECTED_MAIN origin HEAD:main
